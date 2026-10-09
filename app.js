@@ -1,6 +1,8 @@
 const SUPABASE_URL = "https://wqdpanvjvxqdcopbdkxq.supabase.co";
 const SUPABASE_KEY = "sb_publishable_I1PrbJxtb3bZsgKNTQ4PbA_mW_T45B5";
 
+let modoCadastro = false;
+
 // Cache local para guardar as lições carregadas da API e calcular o XP
 let licoesCache = [];
 
@@ -15,109 +17,83 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Adiciona o evento de submit no formulário de login
     const formLogin = document.getElementById('form-login');
-    formLogin.addEventListener('submit', (e) => {
+    formLogin.addEventListener('submit', async (e) => {
         e.preventDefault(); // Evita o recarregamento da página
-        // Lê nome, e-mail (que agora é o login) e senha do formulário
-        const nome = document.getElementById('campo-nome').value;
+        const nome = document.getElementById('campo-nome').value.trim();
         const email = document.getElementById('campo-email').value.trim();
         const senha = document.getElementById('campo-senha').value;
-        fazerLogin(nome, email, senha);
+        mostrarMensagemLogin('');
+        if (modoCadastro && !nome) {
+            mostrarMensagemLogin('Digite o seu nome');
+            return;
+        }
+        const resultado = await verificarLogin(email, senha, nome);
+        if (resultado === 'ok') {
+            iniciarApp(email);
+        } else if (resultado === 'cadastro-falhou') {
+            mostrarMensagemLogin('Não foi possível criar a conta. Esse e-mail já pode ter conta.');
+        } else {
+            mostrarMensagemLogin('E-mail ou senha incorretos');
+        }
     });
 });
 
-// Função nova: faz o login pelo e-mail conferindo a senha na tabela pyschool_alunos (cadastra o aluno se ainda não existir)
-async function fazerLogin(nome, email, senha) {
-    // Sem e-mail não há o que verificar
-    if (!email) return;
-
-    // Limpa a mensagem de erro de tentativas anteriores
-    mostrarMensagemLogin('');
-
-    // Senha vazia não entra nem cadastra
-    if (!senha) {
-        mostrarMensagemLogin('Digite uma senha');
-        return;
-    }
-
+// Chama uma função do banco e trata falhas da requisição.
+async function chamarRpc(nomeFuncao, corpo) {
     try {
-        // Consulta o aluno pelo e-mail para descobrir se ele já tem cadastro
-        const url = SUPABASE_URL + "/rest/v1/pyschool_alunos?email=eq." + encodeURIComponent(email) + "&select=nome,senha";
-        const response = await fetch(url, {
+        const response = await fetch(SUPABASE_URL + "/rest/v1/rpc/" + nomeFuncao, {
+            method: 'POST',
             headers: {
                 apikey: SUPABASE_KEY,
-                Authorization: "Bearer " + SUPABASE_KEY
-            }
+                Authorization: "Bearer " + SUPABASE_KEY,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(corpo)
         });
-
-        // Se o Supabase recusar a consulta, avisa na tela em vez de tratar como aluno novo
         if (!response.ok) {
-            console.error('Erro ao consultar pyschool_alunos:', response.status);
-            mostrarMensagemLogin('Erro ao verificar o e-mail (código ' + response.status + ')');
-            return;
+            console.error('Erro ao chamar RPC:', nomeFuncao, response.status);
+            return null;
         }
-
-        const dados = await response.json();
-
-        // Nenhuma linha veio: é cadastro, grava nome, e-mail e senha digitados
-        if (!Array.isArray(dados) || dados.length === 0) {
-            // O nome só é obrigatório na criação do cadastro
-            if (!nome) {
-                mostrarMensagemLogin('Digite seu nome para criar o cadastro');
-                return;
-            }
-
-            const respostaCadastro = await fetch(SUPABASE_URL + "/rest/v1/pyschool_alunos", {
-                method: 'POST',
-                headers: {
-                    apikey: SUPABASE_KEY,
-                    Authorization: "Bearer " + SUPABASE_KEY,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ nome: nome, email: email, senha: senha })
-            });
-
-            if (!respostaCadastro.ok) {
-                // 409 significa e-mail duplicado (o índice lower(email) bloqueia variações de maiúsculas/minúsculas)
-                if (respostaCadastro.status === 409) {
-                    mostrarMensagemLogin('Este e-mail já está cadastrado');
-                } else {
-                    const detalhe = await respostaCadastro.text();
-                    console.error('Erro ao cadastrar aluno:', respostaCadastro.status, detalhe);
-                    mostrarMensagemLogin('Erro ao cadastrar o aluno (código ' + respostaCadastro.status + ')');
-                }
-                return;
-            }
-
-            // Guarda o e-mail como identificador do progresso e o nome para exibição
-            localStorage.setItem("pyschool_usuario", email);
-            localStorage.setItem("pyschool_nome", nome);
-            iniciarApp(nome);
-        } else if (dados[0].senha !== senha) {
-            // Aluno existe e a senha não bate: mostra o erro e não entra
-            mostrarMensagemLogin('Senha incorreta');
-        } else {
-            // Senha conferida: guarda o e-mail como identificador e o nome do banco para exibição
-            localStorage.setItem("pyschool_usuario", email);
-            localStorage.setItem("pyschool_nome", dados[0].nome);
-            iniciarApp(dados[0].nome || email);
-        }
+        return await response.json();
     } catch (error) {
-        console.error('Erro no login:', error);
-        mostrarMensagemLogin('Erro de conexão ao verificar a senha');
+        console.error('Erro ao chamar RPC:', nomeFuncao, error);
+        return null;
     }
 }
 
-// Função nova: exibe uma mensagem de erro na tela de login
-function mostrarMensagemLogin(texto) {
-    let msg = document.getElementById('mensagem-login');
-    // Cria o elemento da mensagem na primeira exibição, já que o HTML não tem um campo pronto para isso
-    if (!msg) {
-        msg = document.createElement('p');
-        msg.id = 'mensagem-login';
-        msg.style.color = '#c0392b';
-        document.getElementById('tela-login').appendChild(msg);
+// Confere a senha no banco e salva o e-mail retornado.
+async function verificarLogin(email, senha, nome) {
+    if (modoCadastro) {
+        const cadastro = await chamarRpc('pyschool_cadastrar', {
+            p_nome: nome,
+            p_email: email,
+            p_senha: senha
+        });
+        if (cadastro !== true) return 'cadastro-falhou';
     }
-    msg.textContent = texto;
+    const linhas = await chamarRpc('pyschool_entrar', {
+        p_email: email,
+        p_senha: senha
+    });
+    if (!Array.isArray(linhas) || linhas.length === 0) {
+        return modoCadastro ? 'cadastro-falhou' : 'senha-incorreta';
+    }
+    localStorage.setItem("pyschool_usuario", linhas[0].email);
+    return 'ok';
+}
+
+// Alterna a tela entre entrar e criar conta.
+function alternarCadastro() {
+    modoCadastro = !modoCadastro;
+    document.getElementById('campo-nome').style.display = modoCadastro ? 'block' : 'none';
+    document.getElementById('botao-entrar').textContent = modoCadastro ? 'Criar conta' : 'Entrar no PySchool';
+    document.getElementById('link-cadastro').textContent = modoCadastro ? 'Já tenho conta. Quero entrar' : 'Primeira vez? Crie sua conta';
+    mostrarMensagemLogin('');
+}
+
+// Exibe a mensagem no parágrafo existente na tela de login.
+function mostrarMensagemLogin(texto) {
+    document.getElementById('msg-login').textContent = texto;
 }
 
 // Função para iniciar o app após o login
@@ -140,6 +116,7 @@ function sair() {
     document.getElementById('app').style.display = 'none';
     document.getElementById('tela-login').style.display = 'flex';
     document.getElementById('form-login').reset();
+    if (modoCadastro) alternarCadastro();
 }
 
 // Função para alternar entre as telas (seções) do app
